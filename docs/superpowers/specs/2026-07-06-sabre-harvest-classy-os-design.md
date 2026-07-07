@@ -22,7 +22,7 @@ approval-gated import into the CRM's contacts.
 | 2 | Sabre credential | **Dedicated agent sign-in (EPR)** just for the bot — no session conflicts with the admin |
 | 3 | Where it runs | **Admin's Windows PC** via a small installed runner (not cloud) |
 | 4 | Data destination | **Both**: date-stamped Excel in Classy OS **and** approval-gated CRM contact import |
-| 5 | Row shape | **Enriched**: phone/email + passenger name + PNR locator + queue + scrape timestamp |
+| 5 | Row shape | **Enriched**: phone/email + passenger name + PNR locator + **final destination (arrival country)** + queue + scrape timestamp |
 | 6 | AI involvement | **Fallback + monitoring**: gpt-4o-mini rescue-parses only failed pages; plain-language run report. Server-side only, via the OS's existing gated LLM adapter |
 | 7 | Approach | **A — Node.js + Playwright headless runner**, one stack with the OS |
 
@@ -61,8 +61,9 @@ existing `approval_requests` flow (`contacts` domain import action).
 - Queue loop (same logic as `main.py`, made deterministic):
   1. Sign in to Sabre Red 360 web; open the emulator.
   2. Access the queue (`Q/<n>`).
-  3. Per record: send `*H9*PE*HI`, read the emulator's text from the DOM,
-     extract contacts, POST the batch to the OS, send `I` to advance.
+  3. Per record: send `*H9*PE*HI` plus an itinerary display (`*I`), read the
+     emulator's text from the DOM, extract contacts + destination, POST the
+     batch to the OS, send `I` to advance.
   4. Detect Sabre's queue-empty response → report `completed`.
 - Heartbeat every ~15 s (piggybacked on poll/results calls). Poll responses can
   carry a `stop` signal → finish current record, report `stopped`.
@@ -92,7 +93,8 @@ tag `import:sabre-harvest-<runId>` (+ `source:sabre`), lifecycle `lead`.
   partial (bool), created_by.
 - `sabre_run_contacts` — id, run_id, account_id, kind (`phone|email`),
   value_normalized (10-digit NANP string for phones, lowercased email), passenger_name,
-  pnr_locator, raw_line, needs_review (bool, AI-rescue queue), extracted_by
+  pnr_locator, destination_airport (IATA, nullable), destination_country
+  (nullable), raw_line, needs_review (bool, AI-rescue queue), extracted_by
   (`regex|ai`), imported_contact_id (nullable). Unique on
   (run_id, kind, value_normalized).
 
@@ -121,8 +123,13 @@ revoke.
   existing flexible 10/11-digit regex, normalized to 10 digits; emails from
   `¥…¥` fields with plain-email fallback; passenger name parsed from the PNR
   name field (`1.1LASTNAME/FIRSTNAME TITLE` convention → "Firstname Lastname");
-  PNR locator from the record header. Formats validated against a fixture
-  library of captured real screens.
+  PNR locator from the record header. **Final destination:** parse the air
+  segments from the itinerary display; the destination is the turnaround
+  point — the arrival airport where the itinerary stops progressing outbound
+  and turns back toward origin (for one-way trips, the last segment's
+  arrival). Map IATA airport → country with a bundled offline lookup table.
+  Records with no itinerary leave the destination columns blank. Formats
+  validated against a fixture library of captured real screens.
 - **AI rescue (server-side, only on failure):** page had contact-ish signals
   (digit density / `@` present) but extraction found nothing → gpt-4o-mini via
   the OS's existing LLM adapter (`LLM_MODE` double-gate respected). Until the
@@ -133,7 +140,8 @@ revoke.
 
 Auto-titled `Sabre Harvest — Queue <n> — YYYY-MM-DD.xlsx` (suffix `— partial`
 when applicable):
-- **Contacts** sheet: Type, Value, Passenger Name, PNR, Queue, Scraped At.
+- **Contacts** sheet: Type, Value, Passenger Name, PNR, Destination (country,
+  with airport code beside it), Queue, Scraped At.
 - **Summary** sheet: run metadata + counters + report text.
 - (Future, if a legacy workflow needs it: one-column PHONES/EMAILS sheets.)
 
